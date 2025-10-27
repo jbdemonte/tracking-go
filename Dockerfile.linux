@@ -1,0 +1,23 @@
+# Dockerfile.linux
+FROM golang:1.24-bookworm
+
+# OpenCV (headers + runtime) + deps vidéo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config ca-certificates \
+    libopencv-dev libopencv-contrib-dev \
+    libavcodec59 libavformat59 libavutil57 libswscale6 libv4l-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# modèles en local
+COPY models/ models/
+# deps go
+COPY go.mod go.sum ./
+RUN go mod download
+
+# sources
+COPY . .
+
+# build le binaire dans /out de l'image
+RUN mkdir -p /out && go build -o /out/face-pos-linux ./main.go

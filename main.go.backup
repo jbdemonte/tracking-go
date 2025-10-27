@@ -1,0 +1,226 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"image"
+	"image/color"
+	"log"
+	"math"
+
+	"gocv.io/x/gocv"
+)
+
+func main() {
+	// --- Flags (Float64Var + cast ensuite) ---
+	var (
+		protoPath    string
+		modelPath    string
+		deviceID     int
+		confThresh64 float64
+		nmsThresh64  float64
+		width        int
+		height       int
+		showScores   bool
+	)
+	flag.StringVar(&protoPath, "proto", "models/deploy.prototxt", "Path to deploy.prototxt")
+	flag.StringVar(&modelPath, "model", "models/res10_300x300_ssd_iter_140000.caffemodel", "Path to Caffe model")
+	flag.IntVar(&deviceID, "dev", 0, "Camera device ID")
+	flag.Float64Var(&confThresh64, "thr", 0.7, "Confidence threshold [0..1]")
+	flag.Float64Var(&nmsThresh64, "nms", 0.35, "Non-max suppression IoU threshold")
+	flag.IntVar(&width, "w", 0, "Capture width (0=default)")
+	flag.IntVar(&height, "h", 0, "Capture height (0=default)")
+	flag.BoolVar(&showScores, "scores", false, "Show confidence score on overlay")
+	flag.Parse()
+
+	confThresh := float32(confThresh64)
+	nmsThresh := float32(nmsThresh64)
+
+	// --- Load model ---
+	net := gocv.ReadNetFromCaffe(protoPath, modelPath)
+	if net.Empty() {
+		log.Fatalf("failed to load DNN model: %s / %s", protoPath, modelPath)
+	}
+	defer net.Close()
+	net.SetPreferableBackend(gocv.NetBackendDefault)
+	net.SetPreferableTarget(gocv.NetTargetCPU)
+
+	// --- Open webcam ---
+	cap, err := gocv.OpenVideoCapture(deviceID)
+	if err != nil {
+		log.Fatalf("open cam: %v", err)
+	}
+	defer cap.Close()
+
+	if width > 0 {
+		cap.Set(gocv.VideoCaptureFrameWidth, float64(width)) // pas d'assignation
+	}
+	if height > 0 {
+		cap.Set(gocv.VideoCaptureFrameHeight, float64(height)) // pas d'assignation
+	}
+
+	win := gocv.NewWindow("Face Position (DNN)")
+	defer win.Close()
+
+	frame := gocv.NewMat()
+	defer frame.Close()
+
+	for {
+		if ok := cap.Read(&frame); !ok || frame.Empty() {
+			continue
+		}
+
+		imgW, imgH := frame.Cols(), frame.Rows()
+
+		// Blob (BGR, 300x300, mean subtraction)
+		blob := gocv.BlobFromImage(
+			frame, 1.0, image.Pt(300, 300),
+			gocv.NewScalar(104.0, 177.0, 123.0, 0.0),
+			false, false,
+		)
+		net.SetInput(blob, "")
+		detections := net.Forward("")
+		blob.Close()
+
+		// DNN output shape: [1,1,N,7] -> reshape en [N x 7]
+		var boxes []image.Rectangle
+		var scores []float32
+		if !detections.Empty() {
+			// total = 1*1*N*7 -> rows=N, cols=7
+			rows := detections.Total() / 7
+			mat2d := detections.Reshape(1, rows)
+			// mat2d: N rows, 7 cols
+			for i := 0; i < rows; i++ {
+				conf := mat2d.GetFloatAt(i, 2) // [image_id, class_id, conf, x1, y1, x2, y2]
+				if conf < confThresh {
+					continue
+				}
+				x1 := mat2d.GetFloatAt(i, 3)
+				y1 := mat2d.GetFloatAt(i, 4)
+				x2 := mat2d.GetFloatAt(i, 5)
+				y2 := mat2d.GetFloatAt(i, 6)
+
+				l := clampInt(int(x1*float32(imgW)), 0, imgW-1)
+				t := clampInt(int(y1*float32(imgH)), 0, imgH-1)
+				r := clampInt(int(x2*float32(imgW)), 0, imgW-1)
+				b := clampInt(int(y2*float32(imgH)), 0, imgH-1)
+				if r <= l || b <= t {
+					continue
+				}
+				boxes = append(boxes, image.Rect(l, t, r, b))
+				scores = append(scores, conf)
+			}
+			mat2d.Close()
+		}
+
+		// NMS
+		keep := nmsIndices(boxes, scores, nmsThresh)
+
+		// Draw
+		for _, idx := range keep {
+			r := boxes[idx]
+			conf := scores[idx]
+
+			gocv.Rectangle(&frame, r, color.RGBA{0, 255, 0, 255}, 2)
+			cx := float64(r.Min.X) + float64(r.Dx())/2
+			cy := float64(r.Min.Y) + float64(r.Dy())/2
+			nx := (cx - float64(imgW)/2) / (float64(imgW) / 2)
+			ny := (cy - float64(imgH)/2) / (float64(imgH) / 2)
+
+			label := fmt.Sprintf("nx=%.2f ny=%.2f", nx, ny)
+			if showScores {
+				label = fmt.Sprintf("%s  conf=%.2f", label, conf)
+			}
+			org := image.Pt(r.Min.X, maxInt(12, r.Min.Y-8))
+			gocv.PutText(&frame, label, org, gocv.FontHersheySimplex, 0.5, color.RGBA{255, 255, 255, 255}, 1)
+		}
+
+		win.IMShow(frame)
+		if win.WaitKey(1) == 27 { // ESC
+			break
+		}
+	}
+}
+
+// --- Helpers ---
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func iou(a, b image.Rectangle) float64 {
+	ix1 := float64(maxInt(a.Min.X, b.Min.X))
+	iy1 := float64(maxInt(a.Min.Y, b.Min.Y))
+	ix2 := float64(minInt(a.Max.X, b.Max.X))
+	iy2 := float64(minInt(a.Max.Y, b.Max.Y))
+	iw := math.Max(0, ix2-ix1)
+	ih := math.Max(0, iy2-iy1)
+	inter := iw * ih
+	if inter <= 0 {
+		return 0
+	}
+	areaA := float64(a.Dx() * a.Dy())
+	areaB := float64(b.Dx() * b.Dy())
+	return inter / (areaA + areaB - inter)
+}
+
+func nmsIndices(boxes []image.Rectangle, scores []float32, iouThresh float32) []int {
+	n := len(boxes)
+	if n == 0 {
+		return nil
+	}
+	// tri décroissant par score
+	idxs := make([]int, n)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	for i := 0; i < n; i++ {
+		maxI := i
+		for j := i + 1; j < n; j++ {
+			if scores[idxs[j]] > scores[idxs[maxI]] {
+				maxI = j
+			}
+		}
+		idxs[i], idxs[maxI] = idxs[maxI], idxs[i]
+	}
+
+	var keep []int
+	supp := make([]bool, n)
+	for i := 0; i < n; i++ {
+		a := idxs[i]
+		if supp[a] {
+			continue
+		}
+		keep = append(keep, a)
+		for j := i + 1; j < n; j++ {
+			b := idxs[j]
+			if supp[b] {
+				continue
+			}
+			if iou(boxes[a], boxes[b]) > float64(iouThresh) {
+				supp[b] = true
+			}
+		}
+	}
+	return keep
+}
