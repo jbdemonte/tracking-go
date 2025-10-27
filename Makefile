@@ -42,7 +42,11 @@ linux: models
 	docker build -f $(DOCKERFILE) -t $(BUILDER_IMAGE) .
 	@echo "==> Compiling inside container"
 	mkdir -p $(OUT_DIR)
-	docker run --rm -v "$$(pwd)":/src -v "$$(pwd)/$(OUT_DIR)":/out $(BUILDER_IMAGE)
+	docker run --rm \
+	  -v "$$(pwd)":/src \
+	  -v "$$(pwd)/$(OUT_DIR)":/out \
+	  --workdir /src \
+	  $(BUILDER_IMAGE) bash -lc 'go build -o /out/$(APP)-linux ./main.go'
 	@echo "✅ Linux binary ready: $(LINUX_BIN)"
 
 # -------------------------------------------------
