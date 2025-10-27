@@ -1,16 +1,23 @@
+# =========================
+# Project / binaries
+# =========================
 SHELL := /bin/bash
 
-APP := face-pos
-OUT_DIR := bin
-LINUX_BIN := $(OUT_DIR)/$(APP)-linux
-MAC_BIN := $(OUT_DIR)/$(APP)-macos
-DOCKERFILE := Dockerfile.linux
-BUILDER_IMAGE := $(APP)-builder:latest
+APP        := face-pos
+OUT_DIR    := out
+LINUX_BIN  := $(OUT_DIR)/$(APP)-linux
+MAC_BIN    := $(OUT_DIR)/$(APP)-macos
 
+# =========================
+# Model files (OpenCV face detector)
+# =========================
 PROTO_URL := https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt
-MODEL_URL := https://raw.githubusercontent.com/opencv/opencv_3rdparty/97e4a8b/res10_300x300_ssd_iter_140000.caffemodel
+MODEL_URL := https://raw.githubusercontent.com/Isfhan/face-detection-python/master/res10_300x300_ssd_iter_140000.caffemodel
 
-# --- Robust Homebrew prefix detection (no shell else) ---
+
+# =========================
+# macOS (Homebrew) detection for mac build
+# =========================
 BREW_PREFIX ?= $(shell command -v brew >/dev/null 2>&1 && brew --prefix || echo __NONE__)
 ifeq ($(BREW_PREFIX),__NONE__)
   ifneq ("$(wildcard /opt/homebrew)","")
@@ -19,61 +26,74 @@ ifeq ($(BREW_PREFIX),__NONE__)
     BREW_PREFIX := /usr/local
   endif
 endif
-
 PKG_PATH := $(BREW_PREFIX)/opt/opencv/lib/pkgconfig
 DYLD_PATH := $(BREW_PREFIX)/opt/opencv/lib
 
-.PHONY: help models linux mac clean
+# =========================
+# Linux pkg-config search path (OpenCV installé via gocv -> /usr/local)
+# =========================
+LINUX_PKGCONFIG_PATH := /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:$(PKG_CONFIG_PATH)
 
+# =========================
+# Phony
+# =========================
+.PHONY: help linux mac models clean
+
+# =========================
+# Help
+# =========================
 help:
 	@echo ""
 	@echo "=== Build Targets ==="
-	@echo "  make linux   → Build Linux binary via Docker -> $(LINUX_BIN)"
-	@echo "  make mac     → Build macOS binary natively -> $(MAC_BIN)"
-	@echo "  make models  → Download DNN model files (deploy.prototxt + caffemodel)"
-	@echo "  make clean   → Remove ./$(OUT_DIR)"
+	@echo "  make linux   → Build Linux binaire natif -> $(LINUX_BIN)"
+	@echo "                 (utilise pkg-config opencv4)"
+	@echo "  make mac     → Build macOS binaire natif -> $(MAC_BIN)"
+	@echo "  make models  → Télécharge les modèles DNN (si absents)"
+	@echo "  make clean   → Supprime $(OUT_DIR)/"
+	@echo ""
+	@echo "Exécution sous Linux si nécessaire :"
+	@echo "  export LD_LIBRARY_PATH=/usr/local/lib:\$$LD_LIBRARY_PATH && ./$(LINUX_BIN)"
+	@echo "ou bien (persistant) :"
+	@echo "  echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/opencv-local.conf >/dev/null && sudo ldconfig"
 	@echo ""
 
-# -------------------------------------------------
-# Build Linux binary inside a Docker container
-# -------------------------------------------------
+# =========================
+# Build Linux nativement
+# =========================
 linux: models
-	@echo "==> Building Docker image ($(BUILDER_IMAGE))"
-	docker build -f $(DOCKERFILE) -t $(BUILDER_IMAGE) .
-	@echo "==> Compiling inside container"
-	mkdir -p $(OUT_DIR)
-	docker run --rm -v "$$(pwd)":/src -v "$$(pwd)/$(OUT_DIR)":/out $(BUILDER_IMAGE)
+	@echo "==> Building Linux binary ($(LINUX_BIN))"
+	mkdir -p "$(OUT_DIR)"
+	PKG_CONFIG_PATH="$(LINUX_PKGCONFIG_PATH)" \
+	CGO_ENABLED=1 \
+	CGO_CFLAGS="$$(pkg-config --cflags opencv4)" \
+	CGO_LDFLAGS="$$(pkg-config --libs opencv4)" \
+	go build -o "$(LINUX_BIN)" ./main.go
 	@echo "✅ Linux binary ready: $(LINUX_BIN)"
 
-# -------------------------------------------------
-# Build macOS binary natively
-# -------------------------------------------------
+# =========================
+# Build macOS nativement
+# =========================
 mac: models
 	@echo "==> Building macOS binary ($(MAC_BIN))"
 	@echo "   Using OpenCV from $(BREW_PREFIX)"
-	mkdir -p $(OUT_DIR)
-	PKG_CONFIG_PATH=$(PKG_PATH) \
-	DYLD_FALLBACK_LIBRARY_PATH=$(DYLD_PATH) \
+	mkdir -p "$(OUT_DIR)"
+	PKG_CONFIG_PATH="$(PKG_PATH)" \
+	DYLD_FALLBACK_LIBRARY_PATH="$(DYLD_PATH)" \
 	CGO_ENABLED=1 \
-	go build -o $(MAC_BIN) ./main.go
+	go build -o "$(MAC_BIN)" ./main.go
 	@echo "✅ macOS binary ready: $(MAC_BIN)"
 
-# -------------------------------------------------
-# Download DNN model files if missing
-# -------------------------------------------------
+# =========================
+# Download model files (idempotent)
+# =========================
 models:
 	@mkdir -p models
-	@if [ ! -f models/deploy.prototxt ]; then \
-		echo "==> Downloading deploy.prototxt"; \
-		curl -L -o models/deploy.prototxt "$(PROTO_URL)"; \
-	else echo "==> models/deploy.prototxt already exists"; fi
-	@if [ ! -f models/res10_300x300_ssd_iter_140000.caffemodel ]; then \
-		echo "==> Downloading res10_300x300_ssd_iter_140000.caffemodel"; \
-		curl -L -o models/res10_300x300_ssd_iter_140000.caffemodel "$(MODEL_URL)"; \
-	else echo "==> models/res10_300x300_ssd_iter_140000.caffemodel already exists"; fi
+	@[ -f models/deploy.prototxt ] || (echo "==> Downloading deploy.prototxt" && curl -L -o models/deploy.prototxt "$(PROTO_URL)")
+	@[ -f models/res10_300x300_ssd_iter_140000.caffemodel ] || (echo "==> Downloading res10_300x300_ssd_iter_140000.caffemodel" && curl -L -o models/res10_300x300_ssd_iter_140000.caffemodel "$(MODEL_URL)")
+	@echo "✅ Models OK"
 
-# -------------------------------------------------
-# Clean build output
-# -------------------------------------------------
+# =========================
+# Clean
+# =========================
 clean:
-	rm -rf $(OUT_DIR)
+	rm -rf "$(OUT_DIR)"

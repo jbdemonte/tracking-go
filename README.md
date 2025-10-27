@@ -1,6 +1,6 @@
+# Tracking GO
 
-
-Pre-requis sur mac
+## Build on MacOS
 
 ```shell
 # 1) OpenCV + pkg-config
@@ -12,33 +12,47 @@ export PKG_CONFIG_PATH="/opt/homebrew/opt/opencv/lib/pkgconfig:${PKG_CONFIG_PATH
 # Intel :
 # export PKG_CONFIG_PATH="/usr/local/opt/opencv/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
-# 3) CGO ON (obligatoire pour gocv)
+# 3) CGO ON (required fo gocv)
 export CGO_ENABLED=1
 
-# 4) GoCV (dans le projet)
+# 4) GoCV (in the project)
 go mod tidy
 ```
 
-Pre-requis sur linux
+## Build on Linux
 
 ```shell
+# 1) Build deps for OpenCV + GoCV
 sudo apt update
-sudo apt install -y build-essential pkg-config libopencv-dev
-export CGO_ENABLED=1
-go mod tidy
+sudo apt install -y \
+  build-essential pkg-config cmake git curl \
+  libgtk-3-dev libjpeg-dev libpng-dev libtiff-dev libdc1394-dev \
+  libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
+  libv4l-dev libopenexr-dev \
+  libtbb-dev libtbb12
+
+# Install Go 1.24 (official binary)
+curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+
+# Add Go to PATH
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+source ~/.bashrc
+
+# Check
+go version
+
+# Install OpenCV 4.12
+git clone https://github.com/hybridgroup/gocv.git
+cd gocv
+make install 
+cd -
+
+## 4) Verify pkg-config points to the /usr/local OpenCV (should be 4.12.x)
+pkg-config --modversion opencv4
+
+# 5) Build the project 
+#    Usually no extra env is needed, but you can force pkg-config to /usr/local just in case:
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 ```
-
-
-
-
-export CGO_ENABLED=1
-export PKG_CONFIG_PATH="/opt/homebrew/opt/opencv/lib/pkgconfig:$PKG_CONFIG_PATH"
-export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/opt/opencv/lib:$DYLD_FALLBACK_LIBRARY_PATH"
-
-
-
-
-
-curl -L -O https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt
-curl -L -O https://raw.githubusercontent.com/opencv/opencv_3rdparty/97e4a8b/res10_300x300_ssd_iter_140000.caffemodel
-
