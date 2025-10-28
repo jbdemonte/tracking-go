@@ -1,119 +1,187 @@
 package main
 
 import (
-	"image"
+	"context"
+	"encoding/json"
 	"log"
-	"os"
+	"math/rand"
+	"net/http"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
-
-	"gocv.io/x/gocv"
 )
 
-func must(err error, what string) {
-	if err != nil {
-		log.Fatalf("%s: %v", what, err)
+/* ---------------------------- Data definitions ---------------------------- */
+
+// Rect is a bounding-box in pixels, relative to the original image.
+type Rect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// Point is a 2D landmark point (pixel coords).
+type Point struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+// Detection represents a single detected face.
+type Detection struct {
+	ID        int       `json:"id"`
+	BBox      Rect      `json:"bbox"`
+	Landmarks []Point   `json:"landmarks,omitempty"`
+	Score     float64   `json:"score"` // confidence/probability if available
+	Timestamp time.Time `json:"ts"`
+}
+
+// Snapshot is the payload returned by /faces.
+type Snapshot struct {
+	Source     string      `json:"source"` // e.g. "camera0", "file:foo.jpg"
+	Frame      int64       `json:"frame"`  // frame index if applicable
+	Detections []Detection `json:"detections"`
+}
+
+/* --------------------------- Thread-safe storage -------------------------- */
+
+type FaceStore struct {
+	mu   sync.RWMutex
+	snap Snapshot
+}
+
+func NewFaceStore() *FaceStore {
+	return &FaceStore{}
+}
+
+// Set overwrites the latest snapshot (to be called by your detection loop).
+func (s *FaceStore) Set(snap Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap = snap
+}
+
+// Get returns a copy of the latest snapshot.
+func (s *FaceStore) Get() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snap
+}
+
+/* ------------------------------ HTTP server -------------------------------- */
+
+func StartHTTPServer(ctx context.Context, addr string, store *FaceStore) error {
+	mux := http.NewServeMux()
+
+	// Health check
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Latest detections as JSON
+	mux.HandleFunc("/faces", func(w http.ResponseWriter, r *http.Request) {
+		// Simple CORS (optional)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		// Optional cache busting
+		w.Header().Set("Cache-Control", "no-store")
+
+		snap := store.Get()
+
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(snap); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           loggingMiddleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Graceful shutdown
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("HTTP server listening on %s\n", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// loggingMiddleware adds minimal request logs.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t0 := time.Now()
+		next.ServeHTTP(w, r)
+		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(t0))
+	})
+}
+
+/* --------------------------- Example integration --------------------------- */
+
+func main() {
+	// Create the shared store
+	store := NewFaceStore()
+
+	// Simulate your detection loop (replace with real detector)
+	go fakeDetectorLoop(store)
+
+	// OS signal handling + context
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Start HTTP server
+	if err := StartHTTPServer(ctx, ":8080", store); err != nil {
+		log.Fatal(err)
 	}
 }
 
-func main() {
-	// --- Camera
-	cam, err := gocv.OpenVideoCapture(0)
-	must(err, "open video capture")
-	defer cam.Close()
+// fakeDetectorLoop simulates updates from your face detector.
+// Replace this with your real detection function and call store.Set(...) on each frame.
+func fakeDetectorLoop(store *FaceStore) {
+	ticker := time.NewTicker(800 * time.Millisecond)
+	defer ticker.Stop()
 
-	// Optionnel: tenter un format raisonnable (on ignore le bool de retour)
-	cam.Set(gocv.VideoCaptureFrameWidth, 640)
-	cam.Set(gocv.VideoCaptureFrameHeight, 480)
-	cam.Set(gocv.VideoCaptureFPS, 30)
-
-	// --- DNN face detector (Caffe)
-	prototxt := "models/deploy.prototxt"
-	model := "models/res10_300x300_ssd_iter_140000.caffemodel"
-
-	if _, err := os.Stat(prototxt); err != nil {
-		log.Fatalf("missing prototxt: %s", prototxt)
-	}
-	if _, err := os.Stat(model); err != nil {
-		log.Fatalf("missing model: %s", model)
-	}
-
-	net := gocv.ReadNetFromCaffe(prototxt, model)
-	if net.Empty() {
-		log.Fatalf("failed to load DNN model")
-	}
-	defer net.Close()
-
-	net.SetPreferableBackend(gocv.NetBackendDefault)
-	net.SetPreferableTarget(gocv.NetTargetCPU)
-
-	// --- loop
-	img := gocv.NewMat()
-	defer img.Close()
-
-	// Stop propre (Ctrl+C)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	log.Printf("ready: capturing camera and logging face boxes (no display)")
-	lastLogNoFace := time.Time{}
-
-	go func() {
-		for {
-			if ok := cam.Read(&img); !ok || img.Empty() {
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-
-			// Blob pour le modèle SSD (taille 300, mean BGR 104,177,123)
-			blob := gocv.BlobFromImage(img, 1.0, image.Pt(300, 300), gocv.NewScalar(104.0, 177.0, 123.0, 0), false, false)
-			net.SetInput(blob, "")
-			dets := net.Forward("")
-			blob.Close()
-
-			// dets est [1,1,N,7] -> reshape en [N,7] pour accès 2D i,j
-			if dets.Empty() || dets.Total() < 7 {
-				dets.Close()
-				continue
-			}
-			rows := int(dets.Total() / 7)
-			flat := dets.Reshape(1, rows) // channels=1, rows=N => cols=7
-			dets.Close()
-			defer flat.Close() // close à la fin de l'itération
-
-			foundAny := false
-			h := float32(img.Rows())
-			w := float32(img.Cols())
-
-			for i := 0; i < flat.Rows(); i++ {
-				conf := flat.GetFloatAt(i, 2)
-				if conf < 0.5 {
-					continue
-				}
-				x1 := int(flat.GetFloatAt(i, 3) * w)
-				y1 := int(flat.GetFloatAt(i, 4) * h)
-				x2 := int(flat.GetFloatAt(i, 5) * w)
-				y2 := int(flat.GetFloatAt(i, 6) * h)
-				rect := image.Rect(x1, y1, x2, y2)
-
-				foundAny = true
-				log.Printf("face conf=%.2f box=[x=%d y=%d w=%d h=%d]",
-					conf, rect.Min.X, rect.Min.Y, rect.Dx(), rect.Dy())
-			}
-
-			// log “no face” max 1/s pour éviter le spam
-			if !foundAny {
-				if time.Since(lastLogNoFace) >= time.Second {
-					log.Printf("no face")
-					lastLogNoFace = time.Now()
-				}
-			}
-
-			flat.Close() // ferme avant de boucler
+	var frame int64
+	for range ticker.C {
+		frame++
+		n := rand.Intn(3) // 0..2 faces
+		dets := make([]Detection, 0, n)
+		for i := 0; i < n; i++ {
+			dets = append(dets, Detection{
+				ID: i,
+				BBox: Rect{
+					X:      rand.Intn(800),
+					Y:      rand.Intn(450),
+					Width:  80 + rand.Intn(120),
+					Height: 80 + rand.Intn(120),
+				},
+				Landmarks: []Point{
+					{X: rand.Intn(1024), Y: rand.Intn(768)},
+					{X: rand.Intn(1024), Y: rand.Intn(768)},
+					{X: rand.Intn(1024), Y: rand.Intn(768)},
+				},
+				Score:     0.7 + rand.Float64()*0.3,
+				Timestamp: time.Now().UTC(),
+			})
 		}
-	}()
 
-	<-stop
-	log.Println("stopping… bye")
+		store.Set(Snapshot{
+			Source:     "camera0",
+			Frame:      frame,
+			Detections: dets,
+		})
+	}
 }
