@@ -264,7 +264,7 @@ func StartDetectorLoop(ctx context.Context, cfg DetectorConfig, store *FaceStore
 				Detections:  faces,
 				GeneratedAt: time.Now().UTC(),
 			})
-			log.Printf("[detector] frame=%d faces=%d (%dx%d)", frame, len(faces), fw, fh)
+			// log.Printf("[detector] frame=%d faces=%d (%dx%d)", frame, len(faces), fw, fh)
 		}
 	}
 }
