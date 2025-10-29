@@ -1,63 +1,63 @@
-# open-on-screen-fullscreen.sh
+# 🖥️ open-on-screen.sh
 
-A shell script to open a browser on a specific **display** (screen) in **fullscreen or kiosk mode**,  
-with optional per-screen browser profiles and auto camera/mic permissions.
+A simple Bash script to open a browser (Brave, Chrome, Chromium, or Firefox)
+in **kiosk fullscreen mode** on a specific **monitor** under **X11**.
 
-Supports **Wayland** and **X11 (Xorg)** environments on Ubuntu.
-
----
-
-## 🧭 Overview
-
-This script was originally made for **Linux Lite (X11)** and now works on **Ubuntu (Wayland)** too.  
-It automatically detects whether you’re running on **Wayland** or **Xorg**, and adapts:
-
-- On **X11** → moves the window to the specified screen and fullscreen it (`wmctrl`).
-- On **Wayland** → launches directly in **kiosk mode** (fullscreen, no bars) because Wayland doesn’t allow external window control.
-- You can force X11 behavior on Wayland with `FORCE_X11=1`.
+It automatically:
+- Detects your monitors (`xrandr --listmonitors`)
+- Forces **X11 mode** (no Wayland, no keyring)
+- Starts the browser in **kiosk / fullscreen**
+- Disables *first-run*, *default browser* and *analytics prompts*
+- Positions the window on the specified display
 
 ---
 
-## 🛠️ Requirements
+## 🧩 Requirements (Ubuntu)
 
-### System tools
-Install the required X11 utilities (used only under Xorg):
+### 1. Disable Wayland
+
+This script requires **X11** (not Wayland).
+To disable Wayland on Ubuntu:
 
 ```bash
-sudo apt update
-sudo apt install -y x11-xserver-utils wmctrl xdotool
+sudo nano /etc/gdm3/custom.conf
 ```
 
-### Check your session type
-Run this command to know what you’re using:
+Then **uncomment** or **add** this line:
+```
+WaylandEnable=false
+```
 
+Save, exit (`Ctrl+O`, `Ctrl+X`) and **reboot** your machine:
+```bash
+sudo reboot
+```
+
+After reboot, verify that X11 is active:
 ```bash
 echo $XDG_SESSION_TYPE
 ```
-
-- If it prints `x11` → full window control works.
-- If it prints `wayland` → only kiosk mode is possible unless you set `FORCE_X11=1`.
+✅ You should see `x11`.
 
 ---
 
-## 🌐 Browser installation
+### 2. Install required packages
 
-### 🦊 Firefox (recommended .deb version, not Snap)
-Ubuntu installs Firefox as a **Snap** by default — this prevents external window control.  
-Remove it and install the native `.deb` version:
-
+Install the tools used by the script:
 ```bash
-sudo snap remove firefox
-sudo add-apt-repository ppa:mozillateam/ppa
 sudo apt update
-sudo apt install -y firefox
+sudo apt install -y x11-xserver-utils xdotool wmctrl
 ```
 
----
+Optional (if you plan to use Brave or Chrome):
+```bash
+sudo apt install -y brave-browser
+# or
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt install ./google-chrome-stable_current_amd64.deb
+```
 
-### 🌍 Google Chrome
-
-Official Google repository:
+Or using the official Google repository:
 ```bash
 wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
@@ -65,144 +65,139 @@ sudo apt update
 sudo apt install -y google-chrome-stable
 ```
 
----
-
-### 🧭 Brave Browser
-
-Official Brave repo:
+You can also use Chromium or Firefox from Ubuntu repositories:
 ```bash
-sudo apt install -y curl
-sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list
-sudo apt update
-sudo apt install -y brave-browser
+sudo apt install -y chromium-browser firefox
 ```
 
 ---
 
-### 💻 Microsoft Edge (optional)
+### 3. Download or create the script
+
+Save the file as `open-on-screen.sh`:
 
 ```bash
-wget -q https://packages.microsoft.com/keys/microsoft.asc -O- | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-edge.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
-sudo apt update
-sudo apt install -y microsoft-edge-stable
+nano open-on-screen.sh
+```
+
+Paste the full script (see project repository) and make it executable:
+
+```bash
+chmod +x open-on-screen.sh
 ```
 
 ---
 
-### ⚙️ Chromium
+### 4. Check your monitors
+
+Use `xrandr` to list all monitors and their indexes:
 
 ```bash
-sudo snap install chromium
+xrandr --listmonitors
 ```
 
-> ⚠️ Note: Chromium Snap cannot be controlled by `wmctrl` (sandboxed),  
-> so only kiosk mode will work unless you switch to a .deb-based browser.
+Example output:
+```
+Monitors: 2
+ 0: +*HDMI-1 3840/610x2160/350+0+0  HDMI-1
+ 1: +HDMI-2 1920/530x1080/300+3840+0  HDMI-2
+```
+
+In this case:
+- Monitor **#1** = HDMI-1
+- Monitor **#2** = HDMI-2
 
 ---
 
-## 🚀 Usage
+### 5. Run the script
 
+#### 🦁 Brave
 ```bash
-./open-on-screen-fullscreen.sh <url> [output_name] [browser_alias]
+./open-on-screen.sh 1 brave http://localhost:8080
 ```
 
-### Example
-
+#### 🧭 Google Chrome / Chromium
 ```bash
-./open-on-screen-fullscreen.sh "http://localhost:8080" HDMI-1 chrome
+./open-on-screen.sh 2 chrome https://example.com
 ```
 
-### Browser aliases
-You can use short names:
-```
-chrome, chromium, brave, firefox, vivaldi, edge
+#### 🦊 Firefox
+```bash
+./open-on-screen.sh 1 firefox https://mozilla.org
 ```
 
 ---
 
-## 🖥️ How it works
+### 6. Notes
 
-- Detects the session type (`wayland` or `x11`).
-- If X11: uses `xrandr` to find the screen geometry, launches the browser,  
-  moves the window to the target display and makes it fullscreen using `wmctrl`.
-- If Wayland: directly launches the browser in kiosk mode (`--kiosk`).
+✅ **No password / keyring prompt**
+The script uses `--password-store=basic` and isolated user profiles (`~/.kiosk-<browser>-<index>`).
 
-### Forcing X11 mode (under Wayland)
-You can run:
-```bash
-FORCE_X11=1 ./open-on-screen-fullscreen.sh "https://example.com" HDMI-1 brave
+✅ **No "default browser" prompt**
+Flags `--no-first-run` and `--no-default-browser-check` are set.
+
+✅ **Brave analytics popup disabled**
+The script pre-creates preference files with:
+```json
+"brave": { "p3a": { "enabled": false, "notice_acknowledged": true } }
 ```
-This forces the browser to run under **XWayland** (`--ozone-platform=x11`) so `wmctrl` works again.
+
+✅ **Window placement**
+The browser window is moved and resized automatically to match the chosen monitor geometry.
 
 ---
 
-## 🧩 Exiting fullscreen / kiosk mode
+### 7. Troubleshooting
 
-| Browser                              | Mode                 | How to exit                                                             |
-|--------------------------------------|----------------------|-------------------------------------------------------------------------|
-| **Firefox**                          | `--kiosk`            | Press **Alt + F4** or run `pkill firefox`                               |
-|                                      | `--fullscreen`       | Toggle with **F11**                                                     |
-| **Chrome / Brave / Edge / Chromium** | `--kiosk`            | Press **Alt + F4** or run `pkill chrome` / `pkill brave` / `pkill edge` |
-|                                      | `--start-fullscreen` | Toggle with **F11**                                                     |
-| **All browsers**                     | Any                  | You can always close from terminal: `pkill <browser>`                   |
-
-If you prefer a *quittable fullscreen* (normal fullscreen with F11),  
-you can modify the script to replace `--kiosk` with `--start-fullscreen`.
-
----
-
-## 🧰 Example: Debugging
-
-List connected displays:
-```bash
-xrandr --query
-```
-
-Check your current session type:
+**Check if X11 is active:**
 ```bash
 echo $XDG_SESSION_TYPE
 ```
+Should output `x11`.
 
-See what windows `wmctrl` detects:
+**Check available monitors:**
 ```bash
-wmctrl -lx
+xrandr --listmonitors
 ```
 
-Check if a browser is running:
+**If browser doesn’t appear:**
+Try running with debug mode:
 ```bash
-pgrep -a chrome
+bash -x ./open-on-screen.sh 1 brave http://localhost:8080
+```
+
+**To exit kiosk mode:**
+Use `Alt + F4` or `Alt + Tab` to switch and close the window manually.
+
+---
+
+### 🧰 Tested on
+
+- Ubuntu 24.04 LTS
+- Brave 1.77+
+- Google Chrome 129+
+- Chromium 129+
+- Firefox 130+
+
+---
+
+### ⚙️ Optional
+
+If you want the script to run automatically at startup, you can add it to your user’s **autostart**:
+
+```bash
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/open-on-screen.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Exec=/home/$USER/open-on-screen.sh 1 brave http://localhost:8080
+X-GNOME-Autostart-enabled=true
+Name=Kiosk Display
+EOF
 ```
 
 ---
 
-## ✅ Summary
+### 🏁 License
 
-| Environment                   | Behavior                                | Control               |
-|-------------------------------|-----------------------------------------|-----------------------|
-| **X11 (Xorg)**                | Full window control (move + fullscreen) | Works via `wmctrl`    |
-| **Wayland (default Ubuntu)**  | Only kiosk mode (no window management)  | `--kiosk` only        |
-| **FORCE_X11=1 under Wayland** | Runs browser under XWayland             | Full control restored |
-
----
-
-## 💡 Tips
-
-- If you run a minimal server (no desktop), install Xorg and Openbox:
-  ```bash
-  sudo apt install -y xorg openbox
-  startx /usr/bin/openbox
-  ```
-- Each screen gets its own browser profile at:  
-  `~/.browser-per-output/<browser>_<screen>/`
-
----
-
-## 📜 License
-MIT — feel free to use and modify.
-
----
-
-## ✨ Author
-Script originally designed for **Linux Lite**, updated for **Ubuntu + Wayland** support.
+MIT License — free to use and modify.

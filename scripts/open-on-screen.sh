@@ -1,219 +1,174 @@
 #!/usr/bin/env bash
+# ============================================================
+# open-on-screen.sh (X11 kiosk launcher)
+# ------------------------------------------------------------
+# Usage:
+#   ./open-on-screen.sh <monitor_index> <browser> <url>
+#
+# Examples:
+#   ./open-on-screen.sh 1 brave http://localhost:8080
+#   ./open-on-screen.sh 2 chrome https://example.com
+#   ./open-on-screen.sh 1 firefox https://mozilla.org
+#
+# Requirements: xrandr, wmctrl, xdotool
+# ============================================================
 set -euo pipefail
 
-# -----------------------------------------------
-# open-on-screen-fullscreen.sh  (Wayland-aware)
-# -----------------------------------------------
-# Usage: ./open-on-screen-fullscreen.sh <url> [output_name] [browser_alias]
-# - browser_alias accepted: chrome, chromium, brave, vivaldi, edge, firefox
-# Behavior:
-# - X11 (or FORCE_X11=1): place window on target output with wmctrl, then fullscreen
-# - Wayland (default): launch in --kiosk (no window control under Wayland)
-#
-# Env:
-#   FORCE_X11=1  -> Under Wayland, run browser via XWayland and use wmctrl.
-#
-# NOTE: Comments in English as requested.
+err(){ echo "[ERROR] $*" >&2; exit 1; }
+info(){ echo "[INFO] $*" >&2; }
 
-die() { echo "Error: $*" >&2; exit 1; }
-warn() { echo "Warning: $*" >&2; }
+[[ $# -ge 3 ]] || err "Usage: $0 <monitor_index> <browser> <url>"
+MON_IDX_1B="$1"; shift
+BROWSER_IN="$1"; shift
+URL="$1"; shift || true
 
-need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found. Install it first."; }
-have() { command -v "$1" >/dev/null 2>&1; }
+# ------------------------------------------------------------
+# Dependencies check
+# ------------------------------------------------------------
+for c in xrandr xdotool wmctrl; do
+  command -v "$c" >/dev/null 2>&1 || err "$c not found (sudo apt install x11-xserver-utils xdotool wmctrl)"
+done
 
-URL="${1:-}"
-TARGET_OUT="${2:-}"          # e.g., HDMI-2 or DP-1; if empty, first connected
-USER_BROWSER_ALIAS="${3:-}"  # e.g., chrome | brave | edge | firefox | chromium | vivaldi
+# ------------------------------------------------------------
+# Force X11 environment (avoid Wayland/Keyring issues)
+# ------------------------------------------------------------
+export -n WAYLAND_DISPLAY || true
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+export QT_QPA_PLATFORM=xcb
+export OZONE_PLATFORM=x11
+export MOZ_ENABLE_WAYLAND=0
+export MOZ_DISABLE_WAYLAND=1
 
-[[ -n "${URL}" ]] || die "Usage: $0 <url> [output_name] [browser_alias]"
+# ------------------------------------------------------------
+# Monitor geometry detection via xrandr
+# ------------------------------------------------------------
+MON_CNT=$(xrandr --listmonitors | awk 'NR==1{print $2}')
+(( MON_IDX_1B >= 1 && MON_IDX_1B <= MON_CNT )) || err "monitor_index out of range (1..$MON_CNT)"
+MON_IDX_0B=$(( MON_IDX_1B - 1 ))
 
-SESSION_TYPE="${XDG_SESSION_TYPE:-}"
-FORCE_X11="${FORCE_X11:-0}"
+LINE=$(xrandr --listmonitors | awk -v idx="$MON_IDX_0B" 'NR>1 { split($1,a,":"); if (a[1]==idx){print; exit} }')
+GEOM=$(awk '{print $(NF-1)}' <<<"$LINE")
+NAME=$(awk '{print $NF}' <<<"$LINE")
+read -r W H X Y < <(sed -E 's#([0-9]+)/[0-9]+x([0-9]+)/[0-9]+\+([0-9]+)\+([0-9]+)#\1 \2 \3 \4#' <<<"$GEOM")
 
-is_wayland=0
-[[ "${SESSION_TYPE}" == "wayland" ]] && is_wayland=1
+info "Monitor[$MON_IDX_1B] = $NAME, geometry=${W}x${H}+${X}+${Y}"
 
-# ---------- Alias -> (binary, wm_class) ----------
-map_alias() {
-  local alias="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$alias" in
-    "" ) echo "" ""; return 0;;
-    chrome|google-chrome|chrome-browser|google-chrome-stable) echo "google-chrome google-chrome";;
-    brave|brave-browser)                                      echo "brave-browser brave-browser";;
-    edge|microsoft-edge)                                      echo "microsoft-edge microsoft-edge";;
-    vivaldi)                                                  echo "vivaldi vivaldi";;
-    chromium|chromium-browser)                                echo "chromium chromium";;
-    firefox)                                                  echo "firefox firefox";;
-    * ) echo "$alias" "$alias";;
-  esac
-}
-
-# ---------- Pick browser ----------
-PREFERRED_BROWSERS=( google-chrome chromium chromium-browser brave-browser vivaldi microsoft-edge firefox )
-
-CHOSEN="" CLASS_MATCH=""
-if [[ -n "$USER_BROWSER_ALIAS" ]]; then
-  read -r BIN CCLASS < <(map_alias "$USER_BROWSER_ALIAS")
-  [[ -n "$BIN" ]] || die "Invalid browser alias."
-  have "$BIN" || die "Requested browser '$USER_BROWSER_ALIAS' mapped to '$BIN' but not found in PATH."
-  CHOSEN="$BIN"; CLASS_MATCH="$CCLASS"
-else
-  for b in "${PREFERRED_BROWSERS[@]}"; do
-    if have "$b"; then
-      CHOSEN="$b"
-      case "$b" in
-        google-chrome) CLASS_MATCH="google-chrome" ;;
-        brave-browser) CLASS_MATCH="brave-browser" ;;
-        microsoft-edge) CLASS_MATCH="microsoft-edge" ;;
-        vivaldi) CLASS_MATCH="vivaldi" ;;
-        chromium|chromium-browser) CLASS_MATCH="chromium" ;;
-        firefox) CLASS_MATCH="firefox" ;;
-        *) CLASS_MATCH="$b" ;;
-      esac
-      break
-    fi
-  done
-  [[ -n "$CHOSEN" ]] || die "No supported browser found (tried: ${PREFERRED_BROWSERS[*]})."
-fi
-
-# ---------- Profiles per output ----------
-BASE_PROF="$HOME/.browser-per-output"
-mkdir -p "$BASE_PROF"
-SAFE_OUT="$(echo "${TARGET_OUT:-default}" | tr '/' '_' )"
-PROFILE_DIR="$BASE_PROF/${CHOSEN}_${SAFE_OUT}"
+# ------------------------------------------------------------
+# Browser command builder
+# ------------------------------------------------------------
+PROFILE_DIR="$HOME/.kiosk-$BROWSER_IN-$MON_IDX_1B"
 mkdir -p "$PROFILE_DIR"
 
-# ---------- Firefox auto media allow ----------
-prepare_firefox_userjs() {
-  local pdir="$1"
-  mkdir -p "$pdir"
-  cat > "$pdir/user.js" <<'EOF'
-user_pref("media.navigator.permission.disabled", true);
-user_pref("permissions.default.camera", 1);
-user_pref("permissions.default.microphone", 1);
-user_pref("media.navigator.streams.fake", false);
-EOF
-}
-
-# ---------- Should we use X11 control path? ----------
-use_x11_ctrl=0
-if (( FORCE_X11 == 1 )); then
-  use_x11_ctrl=1
-elif (( is_wayland == 0 )); then
-  use_x11_ctrl=1
-fi
-
-# ---------- If using X11 control: need xrandr & wmctrl ----------
-if (( use_x11_ctrl == 1 )); then
-  need xrandr
-  need wmctrl
-  if ! xrandr --query >/dev/null 2>&1; then
-    warn "xrandr can't open display. Falling back to Wayland-safe kiosk mode."
-    use_x11_ctrl=0
-  fi
-fi
-
-# ---------- Resolve geometry (X11 path only) ----------
-W=""; H=""; OFFSET_X=""; OFFSET_Y=""; GEOM=""
-if (( use_x11_ctrl == 1 )); then
-  if [[ -n "${TARGET_OUT}" ]]; then
-    GEOM=$(xrandr | awk -v out="$TARGET_OUT" '$1==out && / connected/ {
-      for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { print $i; exit }
-    }')
-    [[ -n "${GEOM}" ]] || die "Display '$TARGET_OUT' not found or not connected."
-  else
-    GEOM=$(xrandr | awk '/ connected/ {
-      for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { print $i; exit }
-    }')
-    [[ -n "${GEOM}" ]] || die "No connected display found."
-    TARGET_OUT=$(xrandr | awk '/ connected/ {print $1; exit}')
-  fi
-  WH="${GEOM%%+*}"
-  OFFSET_X="${GEOM#*+}"; OFFSET_X="${OFFSET_X%%+*}"
-  OFFSET_Y="${GEOM##*+}"
-  W="${WH%x*}"
-  H="${WH#*x}"
-  echo "X11 control: target $TARGET_OUT => ${W}x${H}+${OFFSET_X}+${OFFSET_Y}"
-else
-  echo "Wayland-safe mode (no window control): launching kiosk."
-fi
-
-# ---------- Compose launch command ----------
-LAUNCH_CMD=()
-ENV_PREFIX=()
-
-if (( use_x11_ctrl == 1 )) && (( is_wayland == 1 )); then
-  # We are in Wayland but user asked X11 control -> force XWayland
-  case "$CHOSEN" in
-    firefox)
-      ENV_PREFIX=(env MOZ_ENABLE_WAYLAND=0)
-      ;;
-    google-chrome|chromium|chromium-browser|brave-browser|vivaldi|microsoft-edge)
-      LAUNCH_CMD+=(--ozone-platform=x11)
-      ;;
-  esac
-fi
-
-case "$CHOSEN" in
-  firefox)
-    prepare_firefox_userjs "$PROFILE_DIR"
-    if (( use_x11_ctrl == 1 )); then
-      # No --kiosk here: we need to move/resize before fullscreen
-      BASE_ARGS=(--no-remote --profile "$PROFILE_DIR" --new-window "$URL")
-    else
-      BASE_ARGS=(--no-remote --profile "$PROFILE_DIR" --kiosk "$URL")
-    fi
+# Find binary
+case "$BROWSER_IN" in
+  brave|brave-browser)
+    BROWSER_BIN=$(command -v brave-browser || command -v brave || true)
     ;;
-  google-chrome|chromium|chromium-browser|brave-browser|vivaldi|microsoft-edge)
-    COMMON_FLAGS=(
-      --user-data-dir="$PROFILE_DIR"
-      --use-fake-ui-for-media-stream
-      --autoplay-policy=no-user-gesture-required
-      --no-first-run --no-default-browser-check --disable-infobars
-    )
-    if (( use_x11_ctrl == 1 )); then
-      BASE_ARGS=("${COMMON_FLAGS[@]}" --new-window "$URL")
-    else
-      BASE_ARGS=("${COMMON_FLAGS[@]}" --kiosk "$URL")
-    fi
+  chrome|google-chrome)
+    BROWSER_BIN=$(command -v google-chrome || command -v google-chrome-stable || true)
+    ;;
+  chromium|chromium-browser)
+    BROWSER_BIN=$(command -v chromium || command -v chromium-browser || true)
+    ;;
+  firefox)
+    BROWSER_BIN=$(command -v firefox || true)
     ;;
   *)
-    if (( use_x11_ctrl == 1 )); then
-      BASE_ARGS=(--new-window "$URL")
-    else
-      BASE_ARGS=(--kiosk "$URL")
-    fi
+    err "Unknown browser: $BROWSER_IN (supported: brave, chrome, chromium, firefox)"
+    ;;
+esac
+[[ -n "$BROWSER_BIN" ]] || err "Browser not found: $BROWSER_IN"
+
+# ------------------------------------------------------------
+# Disable Brave P3A analytics banner (privacy prompt)
+# ------------------------------------------------------------
+if [[ "$BROWSER_IN" =~ ^(brave|brave-browser)$ ]]; then
+  mkdir -p "$PROFILE_DIR/Default"
+  cat >"$PROFILE_DIR/Local State" <<'JSON'
+{
+  "brave": {
+    "p3a": {
+      "enabled": false,
+      "notice_acknowledged": true
+    }
+  }
+}
+JSON
+  cat >"$PROFILE_DIR/Default/Preferences" <<'JSON'
+{
+  "brave": {
+    "p3a": {
+      "enabled": false,
+      "notice_acknowledged": true
+    }
+  }
+}
+JSON
+fi
+
+# ------------------------------------------------------------
+# Generate final browser command
+# ------------------------------------------------------------
+case "$BROWSER_IN" in
+  brave|brave-browser)
+    BROWSER_CMD="$BROWSER_BIN \
+      --kiosk --new-window --start-fullscreen \
+      --no-first-run --no-default-browser-check --disable-infobars \
+      --password-store=basic \
+      --user-data-dir=\"$PROFILE_DIR\" \
+      --ozone-platform=x11 \
+      --disable-background-networking \
+      --disable-component-update \
+      --disable-sync \
+      --disable-features=TranslateUI \
+      --hide-crash-restore-bubble"
+    ;;
+  chrome|google-chrome|chromium|chromium-browser)
+    BROWSER_CMD="$BROWSER_BIN \
+      --kiosk --new-window --start-fullscreen \
+      --no-first-run --no-default-browser-check --disable-infobars \
+      --password-store=basic \
+      --user-data-dir=\"$PROFILE_DIR\" \
+      --ozone-platform=x11 \
+      --disable-background-networking \
+      --disable-component-update \
+      --disable-sync \
+      --disable-features=TranslateUI \
+      --hide-crash-restore-bubble"
+    ;;
+  firefox)
+    BROWSER_CMD="$BROWSER_BIN --kiosk --new-window --profile \"$PROFILE_DIR\" --no-remote"
     ;;
 esac
 
-# Merge args if we had pre-added ozone flag
-FULL_CMD=( "$CHOSEN" "${LAUNCH_CMD[@]}" "${BASE_ARGS[@]}" )
+# ------------------------------------------------------------
+# Launch browser process
+# ------------------------------------------------------------
+info "Launching $BROWSER_IN on monitor $MON_IDX_1B..."
+setsid bash -c "$BROWSER_CMD \"$URL\"" >/dev/null 2>&1 &
+PID=$!
 
-echo "Launching: ${ENV_PREFIX[*]} ${FULL_CMD[*]}"
-# Launch & capture PID
-"${ENV_PREFIX[@]}" "${FULL_CMD[@]}" >/dev/null 2>&1 & BROWSER_PID=$!
-
-# ---------- X11 control: place window & fullscreen ----------
-if (( use_x11_ctrl == 1 )); then
-  # Find the window by PID to avoid collisions
-  WIN_ID=""
-  for i in {1..60}; do
-    WIN_ID=$(wmctrl -lp | awk -v pid="$BROWSER_PID" '$3==pid {w=$1} END{print w}')
+# ------------------------------------------------------------
+# Wait for the browser window to appear
+# ------------------------------------------------------------
+WIN_ID=""
+for _ in $(seq 1 40); do
+  WIN_ID=$(xdotool search --onlyvisible --pid "$PID" 2>/dev/null | head -n1 || true)
+  [[ -n "$WIN_ID" ]] && break
+  for p in $(pgrep -P "$PID" || true); do
+    WIN_ID=$(xdotool search --onlyvisible --pid "$p" 2>/dev/null | head -n1 || true)
     [[ -n "$WIN_ID" ]] && break
-    sleep 0.2
   done
-  [[ -n "$WIN_ID" ]] || die "Could not find the browser window in time."
+  [[ -n "$WIN_ID" ]] && break
+  sleep 0.5
+done
+[[ -n "$WIN_ID" ]] || err "Unable to detect browser window."
 
-  # Move/resize then fullscreen
-  wmctrl -ir "$WIN_ID" -e "0,${OFFSET_X},${OFFSET_Y},${W},${H}"
-  wmctrl -ir "$WIN_ID" -b add,fullscreen || true
+# ------------------------------------------------------------
+# Move and resize window to target monitor
+# ------------------------------------------------------------
+wmctrl -i -r "$WIN_ID" -e "0,${X},${Y},${W},${H}" || true
+wmctrl -i -r "$WIN_ID" -b add,fullscreen || true
 
-  # Optional fallback: send F11 if available
-  if have xdotool; then
-    xdotool windowactivate "$WIN_ID" key F11 || true
-  fi
-
-  echo "✅ Done: fullscreen on ${TARGET_OUT} at (${OFFSET_X},${OFFSET_Y}) ${W}x${H}"
-else
-  echo "✅ Done: launched in kiosk (Wayland-safe). Position cannot be controlled under Wayland."
-fi
+info "✅ $BROWSER_IN launched on $NAME (${W}x${H})"
